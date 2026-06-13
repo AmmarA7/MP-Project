@@ -13,57 +13,89 @@
 #define _XTAL_FREQ 4000000
 
 // --- PIN DEFINITIONS ---
-#define RS RC1  // LCD RS
-#define E RC0   // LCD Enable
+#define RS RC0
+#define E RC1   
 #define D4 RD4
 #define D5 RD5
 #define D6 RD6
 #define D7 RD7
 
-// HC-SR04 Pins
-#define TRIG RB0
-#define ECHO RB1
-#define TRIG_DIR TRISBbits.TRISB0
-#define ECHO_DIR TRISBbits.TRISB1
+// HC-SR04 Pins (SWAPPED FOR HARDWARE INTERRUPT!)
+#define TRIG RB1 // Changed to RB1
+#define ECHO RB0 // MUST be RB0 for External Interrupt (INT)
+#define TRIG_DIR TRISBbits.TRISB1
+#define ECHO_DIR TRISBbits.TRISB0
 
-// Alarm Pins (NEW)
+// Alarm Pins
 #define ALARM_LED RD0
 #define BUZZER RD1
 #define ALARM_LED_DIR TRISDbits.TRISD0
 #define BUZZER_DIR TRISDbits.TRISD1
 
-// --- GLOBAL VARIABLES FOR ISR ---
-volatile unsigned int apnea_timer = 0;   // Tracks time since last breath
-volatile unsigned int ms_counter = 0;    // Helps track exact seconds
-volatile unsigned int seconds_passed = 0;// Tracks our 15-second measurement window
+// --- GLOBAL VARIABLES ---
+// ISR Watchdog variables
+volatile unsigned int apnea_timer = 0;   
+volatile unsigned int ms_counter = 0;    
+volatile unsigned int seconds_passed = 0;
 volatile unsigned char alarm_active = 0; 
+
+// Ultrasonic Interrupt variables
+volatile unsigned int dist_cm = 0;
+volatile unsigned char echo_state = 0; // 0 = Waiting for Rising Edge, 1 = Waiting for Falling Edge
 
 // --- INTERRUPT SERVICE ROUTINE (ISR) ---
 void __interrupt() ISR(void) {
-    // Check if Timer0 caused the interrupt
+    
+    // 1. TIMER0 INTERRUPT: Apnea Watchdog (Ticks every 65.5ms)
     if (TMR0IE && TMR0IF) {
-        TMR0IF = 0; // Clear the interrupt flag
+        TMR0IF = 0; 
         
-        // With 4MHz clock and 1:256 prescaler, Timer0 overflows every 65.5ms
         ms_counter++;
         apnea_timer++;
         
-        // Count full seconds (roughly 15 ticks of 65.5ms = 1 second)
         if (ms_counter >= 15) {
             ms_counter = 0;
             seconds_passed++;
         }
 
-        // ALARM LOGIC: If no breath detected for ~6 seconds (90 ticks)
-        if (apnea_timer > 90) {
+        if (apnea_timer > 90) { // ~6 seconds without a breath
             alarm_active = 1;
-            ALARM_LED = 1; // Turn ON warning light
-            BUZZER = 1;    // Turn ON buzzer
+            ALARM_LED = 1; 
+            BUZZER = 1;    
         } else {
             alarm_active = 0;
             ALARM_LED = 0;
             BUZZER = 0;
         }
+    }
+
+    // 2. EXTERNAL INTERRUPT (RB0/INT): Ultrasonic Echo
+    if (INTE && INTF) {
+        if (echo_state == 0) {
+            // RISING EDGE: Sound wave just fired
+            TMR1H = 0;
+            TMR1L = 0;
+            TMR1ON = 1;              // Start counting microseconds
+            OPTION_REG &= ~(1 << 6); // Flip INTEDG bit to 0 (Look for Falling Edge next)
+            echo_state = 1;
+        } else {
+            // FALLING EDGE: Sound wave returned
+            TMR1ON = 0;              // Stop counting
+            unsigned int time_taken = (TMR1H << 8) | TMR1L;
+            dist_cm = time_taken / 58; // Calculate distance
+            
+            OPTION_REG |= (1 << 6);  // Flip INTEDG bit back to 1 (Look for Rising Edge)
+            echo_state = 0;
+        }
+        INTF = 0; // Clear the interrupt flag
+    }
+    
+    // 3. TIMER1 OVERFLOW: Sensor Timeout (In case the sound wave is lost forever)
+    if (TMR1IE && TMR1IF) {
+        TMR1ON = 0;
+        echo_state = 0;
+        OPTION_REG |= (1 << 6); // Reset to looking for Rising Edge
+        TMR1IF = 0; // Clear flag
     }
 }
 
@@ -105,7 +137,6 @@ void lcd_init_4bit(void) {
     TRISDbits.TRISD6 = 0;
     TRISDbits.TRISD7 = 0;
     __delay_ms(20);
-    
     RS = 0;
     lcd_send_nibble(0x03);
     __delay_ms(5);
@@ -115,7 +146,6 @@ void lcd_init_4bit(void) {
     __delay_us(150);
     lcd_send_nibble(0x02);
     __delay_us(150);
-    
     lcd_command_4bit(0x28);
     lcd_command_4bit(0x0C);
     lcd_command_4bit(0x01);
@@ -150,45 +180,9 @@ unsigned int adc_read(void) {
     return ((ADRESH << 8) + ADRESL); 
 }
 
-// --- ULTRASONIC SENSOR FUNCTION ---
-unsigned int get_distance(void) {
-    unsigned int time_taken, distance;
-    
-    TRIG = 1;
-    __delay_us(10);
-    TRIG = 0;
-    
-    TMR1H = 0;
-    TMR1L = 0;
-    TMR1ON = 1; 
-    
-    while(ECHO == 0) {
-        if(TMR1H > 10) { 
-            TMR1ON = 0;
-            return 0;    
-        }
-    }
-    
-    TMR1ON = 0;
-    TMR1H = 0;
-    TMR1L = 0;
-    TMR1ON = 1;
-    
-    while(ECHO == 1) {
-        if(TMR1H > 100) break;
-    }
-    TMR1ON = 0;
-    
-    time_taken = (TMR1H << 8) | TMR1L;
-    distance = time_taken / 58; 
-    
-    return distance;
-}
-
 // --- MAIN PROGRAM ---
 void main(void) {
     char display_buffer[16];
-    unsigned int dist_cm;
     unsigned int adc_val;
     float voltage;
     int temp_c; 
@@ -206,47 +200,59 @@ void main(void) {
     TRISAbits.TRISA0 = 1; 
     TRIG_DIR = 0;         
     ECHO_DIR = 1;         
-    ALARM_LED_DIR = 0; // Output
-    BUZZER_DIR = 0;    // Output
+    ALARM_LED_DIR = 0; 
+    BUZZER_DIR = 0;    
     
-    ALARM_LED = 0; // Start with alarms OFF
+    ALARM_LED = 0; 
     BUZZER = 0;
     
-    // Configure Timer0 for the ISR Watchdog
-    OPTION_REG &= 0xC0; // Assign prescaler to Timer0
+    // --- CONFIGURE INTERRUPTS ---
+    // Timer0 (Apnea Watchdog)
+    OPTION_REG &= 0xC0; 
     OPTION_REG |= 0x07; // 1:256 prescaler
-    TMR0 = 0;
-    TMR0IE = 1; // Enable Timer0 interrupt
-    PEIE = 1;   // Enable peripheral interrupts
-    GIE = 1;    // Enable global interrupts
+    TMR0IE = 1; 
     
-    T1CON = 0x00; // Timer1 for Ultrasonic
+    // External Interrupt RB0 (Ultrasonic Echo)
+    OPTION_REG |= (1 << 6); // INTEDG = 1 (Interrupt on Rising Edge to start)
+    INTE = 1; 
+    
+    // Timer1 (Ultrasonic Counter)
+    T1CON = 0x00; 
+    TMR1IE = 1; // Enable overflow interrupt just in case
+    
+    // Enable Global and Peripheral Interrupts
+    PEIE = 1;   
+    GIE = 1;    
         
     while(1) {
-        // 1. Read Distance (Chest Position)
-        dist_cm = get_distance();
         
-        // 2. Breath Detection Logic
-        // Assuming normal distance is 50cm. Drops to <48cm when chest expands (inhale)
-        if (dist_cm > 0 && dist_cm < 48 && inhaling == 0) {
+        // 1. Send the Trigger Pulse (Non-blocking!)
+        if (echo_state == 0) { // Only fire if we aren't currently waiting for an echo
+            TRIG = 1;
+            __delay_us(10);
+            TRIG = 0;
+        }
+        
+        // 2. Breath Detection Logic (Using 'dist_cm' which is magically updated by the ISR)
+        if (dist_cm > 0 && dist_cm < 50 && inhaling == 0) {
             inhaling = 1;
             breaths_in_window++;
             
-            // RESET THE ALARM TIMER! We detected a breath.
-            GIE = 0; // Briefly disable interrupts to avoid corruption
+            GIE = 0; 
             apnea_timer = 0; 
             GIE = 1; 
             
-        } else if (dist_cm >= 49 && inhaling == 1) {
-            // Chest returned to resting position (exhale)
+        } else if (dist_cm >= 50 && inhaling == 1) {
             inhaling = 0;
+            GIE = 0; 
+            apnea_timer = 0; 
+            GIE = 1; 
         }
         
         // 3. Calculate BPM every 15 Seconds
         if (seconds_passed >= 15) {
-            resp_rate_bpm = breaths_in_window * 4; // Multiply by 4 for 1-minute rate
+            resp_rate_bpm = breaths_in_window * 4; 
             
-            // Reset for the next 15 second window
             GIE = 0;
             breaths_in_window = 0;
             seconds_passed = 0;
@@ -271,7 +277,7 @@ void main(void) {
         lcd_set_cursor_4bit(2, 0);
         lcd_string_4bit(display_buffer);
         
-        // Read fast (10 times a second) to catch chest movement
+        // A short 100ms delay to prevent the screen from flickering and give the sensor time to rest
         __delay_ms(100); 
     }
 }
