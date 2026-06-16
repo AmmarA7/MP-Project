@@ -1,16 +1,16 @@
 // Configuration Bits
-#pragma config FOSC = XT
+#pragma config FOSC = HS
 #pragma config WDTE = OFF
 #pragma config PWRTE = ON        
 #pragma config BOREN = ON
 #pragma config LVP = OFF
 #pragma config CPD = OFF
 #pragma config CP = OFF
-
+//
 #include <xc.h>
 #include <stdio.h>      
 
-#define _XTAL_FREQ 4000000
+#define _XTAL_FREQ 20000000
 
 // DEFINING PINS 
 #define RS RC0  
@@ -20,12 +20,13 @@
 #define D6 RD6
 #define D7 RD7
 
-
+// FIX: TRIG moved to RB1 and ECHO kept on RB0 ? RB0 is the only pin on PIC16F877A
+//      that supports the external interrupt (INT), which the ISR relies on to detect
+//      the rising and falling edges of the echo pulse. rewire schematic accordingly.
 #define TRIG RB1 
 #define ECHO RB0 
 #define TRIG_DIR TRISBbits.TRISB1
 #define ECHO_DIR TRISBbits.TRISB0
-
 
 #define ALARM_LED RD0
 #define BUZZER RD1
@@ -115,7 +116,11 @@ void __interrupt() ISR(void) {
             ms_counter = 0;
             seconds_passed++;
         }
-        if (apnea_timer > 90) { 
+        // FIX: apnea threshold changed from 90 to 625 ticks.
+        //      at 4MHz with a 1:256 prescaler, TMR0 overflows every ~16.4ms,
+        //      so 625 overflows = ~10 seconds, which is the clinical definition
+        //      of a sleep apnea event (no breath detected for 10+ seconds).
+        if (apnea_timer > 625) { 
             alarm_active = 1;
             ALARM_LED = 1; 
             BUZZER = 1;    
@@ -323,7 +328,7 @@ void main(void) {
         
         if (alarm_active) {
             sprintf(display_buffer, "WARNING: APNEA! ");     // this here evaluates the global safety flag alarm_active (which is forced high by the background 
-        } else {                                            // ISR if the apnea_timer ever climbs past 90 ticks without a breath resetting it). 
+        } else {                                            // ISR if the apnea_timer ever climbs past 625 ticks without a breath resetting it). 
             sprintf(display_buffer, "Resp: %u BPM    ", resp_rate_bpm);
             
            // If a medical emergency is active, Row 1 flashes a major warning message. If breathing is fine, 
