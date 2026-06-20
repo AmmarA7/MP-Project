@@ -6,7 +6,7 @@ Microprocessors course project: Patient Monitoring System
 An embedded C project that transforms a PIC16F877A microcontroller into a real-time, medical patient monitor. 
 This system continuously tracks four critical vitals—**Respiration Rate, Heart Rate, and Room Temperature of ICU**—and features a rigid priority alarm engine to alert medical staff to critical emergencies like apnea or cardiac flatline, or Intensive Care Unit (ICU) temprature which can cause contamination when unit temp is high.
 
-This project demonstrates advanced 8-bit microcontroller techniques, bypassing standard `delay()` functions in favor of **hardware timers and interrupts** to ensure life-safety calculations are never blocked by UI or sensor updates.
+This project demonstrates advanced 8-bit microcontroller techniques, in favor of **hardware timers and interrupts** to ensure life-safety calculations are never blocked by UI or sensor updates.
 
 ## ⚙️ Key Features
 * **Priority Alarm Engine:** Evaluates vitals in a strict medical hierarchy (e.g., an Apnea alarm will immediately override a High Temperature alarm).
